@@ -358,9 +358,7 @@ def main() -> None:
         for sf in slang_files:
             assume_name = os.path.basename(sf) + '.cs'
             with open(sf, 'rb') as f:
-                result = subprocess.run(
-                    ['clang-format', f'--style=file:.clang-format-for-slang', '--Werror', '-n', f'--assume-filename={assume_name}'], stdin=f
-                )
+                result = subprocess.run(['clang-format', '--style=file:.clang-format-for-slang', '--Werror', '-n', f'--assume-filename={assume_name}'], stdin=f)
             if result.returncode != 0:
                 badly_formatted_slang.append(sf)
         if badly_formatted_slang:
