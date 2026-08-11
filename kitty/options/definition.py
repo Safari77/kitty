@@ -531,7 +531,7 @@ opt(
     'scrollbar',
     'scrolled',
     ctype='scrollbar',
-    choices=('scrolled', 'always', 'never', 'hovered', 'scrolled-and-hovered'),
+    choices=('scrolled', 'always', 'never', 'hovered', 'scrolled-and-hovered', 'scrolled-or-hovered'),
     long_text="""\
 Control when the scrollbar is displayed.
 
@@ -541,6 +541,8 @@ Control when the scrollbar is displayed.
     means when the mouse is hovering on the right edge of the window.
 :code:`scrolled-and-hovered`
     means when the mouse is over the scrollbar region *and* scrolling backwards has started.
+:code:`scrolled-or-hovered`
+    means when the mouse is over the scrollbar region *or* scrolling backwards has started.
 :code:`always`
     means whenever any scrollback is present
 :code:`never`
@@ -3564,6 +3566,69 @@ opt(
     long_text="""
 Special modifier key alias for default shortcuts. You can change the value of
 this option to alter all default shortcuts that use :opt:`kitty_mod`.
+""",
+)
+
+opt(
+    'remap_modifiers',
+    '',
+    option_type='remap_modifiers',
+    ctype='!remap_modifiers',
+    add_to_default=False,
+    long_text="""
+Remap modifiers, making one modifier act as another. The syntax is::
+
+    remap_modifiers <from>:<to> <from>:<to> ...
+
+for example :code:`remap_modifiers ctrl:super` makes every :kbd:`Ctrl+key` press
+arrive as :kbd:`Super+key`. Only :code:`shift`, :code:`alt`, :code:`ctrl`,
+:code:`super`, :code:`hyper` and :code:`meta` can be named. The source must be
+exactly one modifier; the destination may name more than one, in which case
+holding the source is indistinguishable from holding all of them.
+
+To swap two modifiers, specify remap rules for both, for example, to swap ctrl and super::
+
+    remap_modifiers ctrl:super super:ctrl
+
+Ordering among :opt:`remap_modifiers` items matters only in that the last item for
+a given source wins.
+
+The remapping happens before anything else looks at the event, so it is
+application wide: kitty's own keyboard shortcuts, :opt:`kitty_mod`,
+:code:`mouse_map` and the keys sent to the program running in the terminal all
+see the remapped modifier. Every mapping in :file:`kitty.conf` is therefore
+written in terms of the modifier a key *becomes*, not the one printed on the
+keycap — including the built-in shortcuts, so :code:`remap_modifiers ctrl super`
+moves every default :code:`ctrl+shift+…` binding onto the physical Super key
+unless you also change :opt:`kitty_mod`.
+
+A modifier key's own press and release are remapped too, so that a program using
+the full keyboard protocol does not see, for example, ctrl reported together with
+the Hyper key. That is only possible when the destination is a single modifier;
+with a multi-modifier destination the key itself keeps its original identity.
+
+On macOS, a menu bar accelerator is shown on the physical key that now produces
+the modifier it was declared with. Where no such key exists — because more than
+one modifier maps onto it, or because it maps to hyper or meta, which the macOS
+menu bar cannot express — the accelerator is left off the menu rather than shown
+incorrectly. The shortcut itself continues to work.
+
+On macOS the remap is applied before the key event reaches the text input
+system, so :kbd:`Option`, which produces text natively unless
+:opt:`macos_option_as_alt` is set, behaves consistently with the modifiers it
+reports. A destination of :kbd:`hyper` or :kbd:`meta` cannot be expressed in
+Cocoa's modifier flags, so such a remap is left unapplied there rather than
+silently losing the modifier.
+
+On Wayland, kitty only detects the :kbd:`hyper` and :kbd:`meta` modifiers when
+:envvar:`KITTY_WAYLAND_DETECT_MODIFIERS` is set in the environment. Without it
+those two never appear on key events at all, so remapping to or from them has
+nothing to act on there.
+
+This is useful for keyboard layouts that move Control somewhere more comfortable
+— for example placing a Hyper key on Caps Lock to use for readline and TUI
+editing, while leaving the physical Control key free for GUI-style shortcuts.
+Use :code:`kitty --debug-input` to see the remapping applied to each event.
 """,
 )
 
