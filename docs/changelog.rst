@@ -184,7 +184,7 @@ Detailed list of changes
 
 - A new option :opt:`remap_modifiers` to allow having modifier keys behave as different modifier keys (:pull:`10307`)
 
-- The :opt:`scrollbar` option now takes a new value ``scrolled-or-hovered`` to also show th escrollbar when the mouse moves over the region (:pull:`10345`)
+- The :opt:`scrollbar` option now takes a new value ``scrolled-or-hovered`` to also show the scrollbar when the mouse moves over the scrollbar region (:pull:`10345`)
 
 - A new :code:`kitten @ screenshot` remote control command to take a pixel perfect PNG screenshot of an OS Window, tab or window
 
@@ -204,6 +204,8 @@ Detailed list of changes
 - :opt:`remember_window_size` now also remembers window maximized state (:pull:`10308`)
 
 - Sessions: Also save/restore layouts other than the currently active layout (:pull:`10324`)
+
+- Wayland: Fix clipboard sharing between kitty instances in containers with isolated PID namespaces (:iss:`10352`)
 
 
 0.48.2 [2026-07-30]

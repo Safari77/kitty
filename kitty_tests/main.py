@@ -150,10 +150,17 @@ class GoProc:
         self.end_time: float = 0.0
         self.tdir = mkdtemp(prefix='kitty-go-tests-')
         env['HOME'] = self.tdir
-        if not env.get('GOCACHE') and (gop := os.path.expanduser('~/.cache/go-build')) and os.path.isdir(gop):
-            env['GOCACHE'] = gop
-        if not env.get('GOMODCACHE') and (gop := os.path.expanduser('~/go/pkg/mod')) and os.path.isdir(gop):
-            env['GOMODCACHE'] = gop
+        if not env.get('GOCACHE') or not env.get('GOMODCACHE'):
+            try:
+                r = subprocess.run([cmd[0], 'env', 'GOCACHE', 'GOMODCACHE'], capture_output=True, text=True, timeout=10)
+                if r.returncode == 0:
+                    gop, gomodp = r.stdout.strip().splitlines()
+                    if gop and not env.get('GOCACHE') and os.path.isdir(gop):
+                        env['GOCACHE'] = gop
+                    if gomodp and not env.get('GOMODCACHE') and os.path.isdir(gomodp):
+                        env['GOMODCACHE'] = gomodp
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         env['XDG_CONFIG_HOME'] = self.tdir + '/conf'
         os.mkdir(env['XDG_CONFIG_HOME'])
         env['XDG_CACHE_HOME'] = self.tdir + '/cache'
@@ -298,6 +305,12 @@ class PipeTestResult(unittest.TestResult):
         super().addUnexpectedSuccess(test)
         self._send({'t': 'xpass', 'id': str(test), 'e': self._elapsed()})
 
+    def addSubTest(self, test: unittest.TestCase, subtest: unittest.TestCase, err: Any) -> None:
+        super().addSubTest(test, subtest, err)
+        if err is not None:
+            record_type = 'fail' if issubclass(err[0], test.failureException) else 'error'
+            self._send({'t': record_type, 'id': str(subtest), 'e': self._elapsed(), 'msg': self._exc_info_to_string(err, test)})
+
 
 def run_test_worker(tests: list[unittest.TestCase], write_fd: int) -> None:
     """Execute in a forked child: run tests, send results over write_fd, then exit."""
@@ -310,7 +323,7 @@ def run_test_worker(tests: list[unittest.TestCase], write_fd: int) -> None:
             with forwardable_stdio():
                 result = PipeTestResult(write_fd)
                 unittest.TestSuite(tests).run(result)
-                exit_code = 0 if not result.failures and not result.errors else 1
+                exit_code = 0
     except Exception:
         import traceback
 
@@ -354,6 +367,52 @@ def fork_test_workers(tests: list[unittest.TestCase]) -> tuple[list[int], list[i
     return pids, read_fds
 
 
+def worker_main(write_fd: int) -> None:
+    # we need fonts installed in the user home directory as well, so initialize
+    # fontconfig before nuking $HOME and friends
+    from kitty.fonts.common import all_fonts_map
+
+    all_fonts_map(True)
+
+    test_ids = json.load(sys.stdin)
+    tests = [getattr(importlib.import_module(t['module']), t['cls'])(t['method']) for t in test_ids]
+    run_test_worker(tests, write_fd)
+
+
+def spawn_test_workers(tests: list[unittest.TestCase]) -> tuple[list[subprocess.Popen[bytes]], list[int]]:
+    """Chunk tests and spawn worker subprocesses via kitty +runpy. Returns (procs, read_fds).
+
+    Used on macOS where fork() + threading is unsafe."""
+    from kitty.constants import kitty_exe
+
+    n = min(os.cpu_count() or 4, 8, len(tests))
+    chunks: list[list[unittest.TestCase]] = [[] for _ in range(n)]
+    for i, test in enumerate(tests):
+        chunks[i % n].append(test)
+
+    procs: list[subprocess.Popen[bytes]] = []
+    read_fds: list[int] = []
+
+    for chunk in chunks:
+        r, w = os.pipe()
+        test_ids = [{'module': t.__class__.__module__, 'cls': t.__class__.__name__, 'method': t._testMethodName} for t in chunk]
+        proc: subprocess.Popen[bytes] = subprocess.Popen(
+            [kitty_exe(), '+runpy', f'from kitty_tests.main import *; worker_main({w})'],
+            pass_fds=(w,),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.close(w)
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(test_ids).encode())
+        proc.stdin.close()
+        read_fds.append(r)
+        procs.append(proc)
+
+    return procs, read_fds
+
+
 _RED = '\x1b[31m'
 _GREEN = '\x1b[32m'
 _YELLOW = '\x1b[33m'
@@ -365,6 +424,7 @@ _DIM = '\x1b[2m'
 
 def collect_worker_results(
     pids: list[int],
+    procs: list[subprocess.Popen[bytes]],
     read_fds: list[int],
     total_py_tests: int,
     go_proc: Optional[GoProc] = None,
@@ -528,7 +588,14 @@ def collect_worker_results(
                         py_worker_errors.append(rec['msg'])
 
     for pid in pids:
-        os.waitpid(pid, 0)
+        _, status = os.waitpid(pid, 0)
+        if status != 0:
+            py_worker_errors.append(f'Python test worker {pid} exited with status {os.waitstatus_to_exitcode(status)}')
+
+    for proc in procs:
+        rc = proc.wait()
+        if rc != 0:
+            py_worker_errors.append(f'Python test worker exited with status {rc}')
 
     elapsed = time.monotonic() - start
 
@@ -647,17 +714,23 @@ def run_tests(report_env: bool = False) -> None:
     if args.name and not tests_list and not has_go:
         raise SystemExit('No test named %s found' % ' '.join(args.name))
 
-    # Pre-initialize fonts once before forking so all worker processes inherit
-    # the warm C-level fontconfig state and their own all_fonts_map() calls are fast.
-    from kitty.fonts.common import all_fonts_map
-
-    all_fonts_map(True)
-
-    # Fork Python workers before modifying the main-process env; each worker
+    # Start Python workers before modifying the main-process env; each worker
     # calls env_for_python_tests independently for full HOME/XDG isolation.
+    # On macOS fork()+threading is unsafe, so use subprocess workers there.
     use_parallel = len(tests_list) > PARALLEL_THRESHOLD
+    worker_pids: list[int] = []
+    worker_procs: list[subprocess.Popen[bytes]] = []
+    read_fds: list[int] = []
     if use_parallel:
-        pids, read_fds = fork_test_workers(tests_list)
+        if sys.platform == 'darwin':
+            worker_procs, read_fds = spawn_test_workers(tests_list)
+        else:
+            # Pre-initialize fonts once before forking so all worker processes inherit
+            # the warm C-level fontconfig state and their own all_fonts_map() calls are fast.
+            from kitty.fonts.common import all_fonts_map
+
+            all_fonts_map(True)
+            worker_pids, read_fds = fork_test_workers(tests_list)
 
     # Launch Go immediately so it runs in parallel with Python env setup and tests.
     if has_go:
@@ -668,34 +741,27 @@ def run_tests(report_env: bool = False) -> None:
     else:
         go_proc = None
     sys.stdout.flush()
-    # we need fonts installed in the user home directory as well, so initialize
-    # fontconfig before nuking $HOME and friends
-    from kitty.fonts.common import all_fonts_map
+    # Module filter with no python tests but go tests present: run go only
+    if args.module and not tests_list:
+        _, go_ok = collect_worker_results([], [], [], 0, go_proc=go_proc)
+        raise SystemExit(0 if go_ok else 1)
 
-    all_fonts_map(True)
-
-    with env_for_python_tests(report_env):
-        # Module filter with no python tests but go tests present: run go only
-        if args.module and not tests_list:
-            _, go_ok = collect_worker_results([], [], 0, go_proc=go_proc)
-            raise SystemExit(0 if go_ok else 1)
-
-        if use_parallel:
-            python_ok, go_ok = collect_worker_results(pids, read_fds, len(tests_list), go_proc=go_proc)
-        elif tests_list:
-            python_ok = run_cli(all_tests, args.verbosity)
-            if go_proc is not None:
-                _, go_ok = collect_worker_results([], [], 0, go_proc=go_proc)
-            else:
-                go_ok = True
+    if use_parallel:
+        python_ok, go_ok = collect_worker_results(worker_pids, worker_procs, read_fds, len(tests_list), go_proc=go_proc)
+    elif tests_list:
+        python_ok = run_cli(all_tests, args.verbosity)
+        if go_proc is not None:
+            _, go_ok = collect_worker_results([], [], [], 0, go_proc=go_proc)
         else:
-            python_ok = True
-            if go_proc is not None:
-                _, go_ok = collect_worker_results([], [], 0, go_proc=go_proc)
-            else:
-                go_ok = True
+            go_ok = True
+    else:
+        python_ok = True
+        if go_proc is not None:
+            _, go_ok = collect_worker_results([], [], [], 0, go_proc=go_proc)
+        else:
+            go_ok = True
 
-        exit_code = 0 if (python_ok and go_ok) else 1
+    exit_code = 0 if (python_ok and go_ok) else 1
 
     if exit_code != 0:
         print('\x1b[31mError\x1b[39m: Some tests failed!')
