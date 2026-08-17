@@ -184,6 +184,16 @@ Detailed list of changes
 
 - A new option :opt:`remap_modifiers` to allow having modifier keys behave as different modifier keys (:pull:`10307`)
 
+- Improve throughput when processing large amounts of text with a scrollback buffer much larger than the CPU cache by ~35% by prefetching scrollback memory before it is written to
+
+- Improve throughput when processing large amounts of text by ~50% for ASCII and ~15% for Unicode by writing runs of plain ASCII chars to the screen in batches and skipping unnecessary bookkeeping in the scrolling and tab handling hot paths
+
+- Speed up SIMD UTF-8 decoding: ~20% faster for ASCII and ~50% faster for multi-byte text on both x86 and ARM, by processing pairs of vectors of plain ASCII text at a time and compacting decoded codepoints within 128-bit lanes, avoiding expensive cross-lane operations. Also add an AVX-512 based decoder, another ~75% faster for multi-byte text, used automatically on CPUs that support it (Intel Ice Lake+, AMD Zen 4+). Additionally fix the SIMD decoders failing to emit U+FFFD for an incomplete UTF-8 sequence cut off by an escape code
+
+- Improve throughput when processing escape code heavy input by ~30% by taking the input buffer lock once per buffer of input rather than once per escape code and using cheaper arithmetic to parse CSI parameters
+
+- Improve throughput when processing large amounts of plain text by another ~10% by finding runs of printable ASCII chars with SIMD, filling cells using wide stores and skipping unnecessary work in the scrolling hot path when there are no images
+
 - The :opt:`scrollbar` option now takes a new value ``scrolled-or-hovered`` to also show the scrollbar when the mouse moves over the scrollbar region (:pull:`10345`)
 
 - A new :code:`kitten @ screenshot` remote control command to take a pixel perfect PNG screenshot of an OS Window, tab or window
@@ -206,6 +216,10 @@ Detailed list of changes
 - Sessions: Also save/restore layouts other than the currently active layout (:pull:`10324`)
 
 - Wayland: Fix clipboard sharing between kitty instances in containers with isolated PID namespaces (:iss:`10352`)
+
+- When expanding a window in alternate screen mode use the most common
+  background color as the color for the newly created lines leading to less
+  visual flicker until the application can redraw itself (:iss:`10365`)
 
 
 0.48.2 [2026-07-30]
