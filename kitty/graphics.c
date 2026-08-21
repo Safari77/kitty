@@ -1732,14 +1732,17 @@ frame_chain_is_transient(Image *img, const Frame *frame) {
 
 static Image *
 handle_animation_frame_load_command(GraphicsManager *self, GraphicsCommand *g, Image *img, const uint8_t *payload, bool *is_dirty) {
-    uint32_t frame_number = g->frame_number, fmt = g->format ? g->format : RGBA;
+    uint32_t fmt = g->format ? g->format : RGBA;
+    unsigned char tt = g->transmission_type ? g->transmission_type : 'd';
+    const bool is_chunked_continuation = tt == 'd' && self->currently_loading.loading_for.image_id == img->internal_id;
+    if (is_chunked_continuation) {
+        INIT_CHUNKED_LOAD; // g now points to the command that started the chunked load
+    }
+    uint32_t frame_number = g->frame_number;
     if (!frame_number || frame_number > img->extra_framecnt + 2) frame_number = img->extra_framecnt + 2;
     bool is_new_frame = frame_number == img->extra_framecnt + 2;
     g->frame_number = frame_number;
-    unsigned char tt = g->transmission_type ? g->transmission_type : 'd';
-    if (tt == 'd' && self->currently_loading.loading_for.image_id == img->internal_id) {
-        INIT_CHUNKED_LOAD;
-    } else {
+    if (!is_chunked_continuation) {
         self->currently_loading.loading_for = (const ImageAndFrame){0};
         if (g->data_width > MAX_IMAGE_DIMENSION || g->data_height > MAX_IMAGE_DIMENSION)
             ABRT("EINVAL", "Image too large, width or height greater than %u", MAX_IMAGE_DIMENSION);
@@ -1769,7 +1772,7 @@ handle_animation_frame_load_command(GraphicsManager *self, GraphicsCommand *g, I
         .y = g->y_offset,
         .is_4byte_aligned = load_data->is_4byte_aligned,
         .is_opaque = load_data->is_opaque,
-        .alpha_blend = g->compose_mode != 1 && !load_data->is_opaque,
+        .alpha_blend = g->blend_mode != 1 && !load_data->is_opaque,
         .gap = g->gap > 0     ? g->gap
                : (g->gap < 0) ? 0
                               : DEFAULT_GAP,
@@ -2173,6 +2176,20 @@ ref_outside_region(const ImageRef *ref, index_type margin_top, index_type margin
     return ref->start_row + (int32_t)ref->effective_num_rows <= (int32_t)margin_top || ref->start_row > (int32_t)margin_bottom;
 }
 
+static float
+src_pixels_per_screen_pixel(const ImageRef *ref, CellPixelSize cell) {
+    // The vertical scale factor mapping pixels in the destination rectangle on
+    // the screen to pixels in the source rectangle. Must match the dest rect
+    // calculation used for rendering in grman_update_layers().
+    float dest_height_px;
+    if (ref->num_rows) dest_height_px = (float)(ref->num_rows * cell.height) - (float)ref->cell_y_offset;
+    else if (ref->num_cols && ref->src_width > 0) {
+        float dest_width_px = (float)(ref->num_cols * cell.width) - (float)ref->cell_x_offset;
+        dest_height_px = dest_width_px * ref->src_height / ref->src_width;
+    } else return 1.f; // rendered at native size
+    return dest_height_px > 0 ? ref->src_height / dest_height_px : 1.f;
+}
+
 static bool
 scroll_filter_margins_func(ImageRef *ref, Image *img, const void *data, CellPixelSize cell) {
     if (ref->is_virtual_ref) return false;
@@ -2181,24 +2198,33 @@ scroll_filter_margins_func(ImageRef *ref, Image *img, const void *data, CellPixe
         ref->start_row += d->amt;
         if (ref_outside_region(ref, d->margin_top, d->margin_bottom)) return true;
         // Clip the image if scrolling has resulted in part of it being outside the page area
-        uint32_t clip_amt, clipped_rows;
+        uint32_t clipped_rows;
+        float clip_amt;
+        const float scale = src_pixels_per_screen_pixel(ref, cell);
         if (ref->start_row < (int32_t)d->margin_top) {
             // image moved up
             clipped_rows = d->margin_top - ref->start_row;
-            clip_amt = cell.height * clipped_rows;
+            clip_amt = scale * (float)(cell.height * clipped_rows - ref->cell_y_offset);
             if (ref->src_height <= clip_amt) return true;
             ref->src_y += clip_amt;
             ref->src_height -= clip_amt;
             ref->effective_num_rows -= clipped_rows;
+            if (ref->num_rows) ref->num_rows -= clipped_rows;
+            ref->cell_y_offset = 0;
             update_src_rect(ref, img);
             ref->start_row += clipped_rows;
         } else if (ref->start_row + (int32_t)ref->effective_num_rows - 1 > (int32_t)d->margin_bottom) {
             // image moved down
             clipped_rows = ref->start_row + ref->effective_num_rows - 1 - d->margin_bottom;
-            clip_amt = cell.height * clipped_rows;
-            if (ref->src_height <= clip_amt) return true;
-            ref->src_height -= clip_amt;
+            // the last row may be only partially covered by the image,
+            // so calculate the clip amount from the height that remains visible
+            float visible_height_px = (float)(cell.height * (ref->effective_num_rows - clipped_rows)) - (float)ref->cell_y_offset;
+            float new_src_height = scale * visible_height_px;
+            if (new_src_height <= 0) return true;
+            clip_amt = ref->src_height - new_src_height;
+            if (clip_amt > 0) ref->src_height -= clip_amt;
             ref->effective_num_rows -= clipped_rows;
+            if (ref->num_rows) ref->num_rows -= clipped_rows;
             update_src_rect(ref, img);
         }
         return ref_outside_region(ref, d->margin_top, d->margin_bottom);
@@ -2455,7 +2481,14 @@ grman_handle_command(GraphicsManager *self, const GraphicsCommand *g, const uint
         return finish_command_response(g, false);
     }
 
-    switch (g->action) {
+    unsigned char action = g->action;
+    if (!action && self->currently_loading.loading_for.image_id && self->currently_loading.start_command.action == 'f') {
+        // A continuation chunk carries no action key, so when the chunked
+        // load was started by an a=f command, route it to the frame load
+        // handler rather than the add handler
+        action = 'f';
+    }
+    switch (action) {
         case 0:
         case 't':
         case 'T':
@@ -2495,9 +2528,16 @@ grman_handle_command(GraphicsManager *self, const GraphicsCommand *g, const uint
                 ret = finish_command_response(g, false);
             } else {
                 GraphicsCommand ag = *g;
-                if (ag.action == 'f') {
+                if (action == 'f') {
+                    if (!ag.action) {
+                        // continuation chunk, the response must identify the image from the start command
+                        ag.action = action;
+                        ag.id = self->currently_loading.start_command.id;
+                        ag.image_number = self->currently_loading.start_command.image_number;
+                    }
                     img = handle_animation_frame_load_command(self, &ag, img, payload, is_dirty);
                     if (!self->currently_loading.loading_for.image_id) free_load_data(&self->currently_loading);
+                    if (!ag.frame_number) ag.frame_number = self->currently_loading.start_command.frame_number;
                     if (g->quiet) ag.quiet = g->quiet;
                     else ag.quiet = self->currently_loading.start_command.quiet;
                     ret = finish_command_response(&ag, img != NULL);

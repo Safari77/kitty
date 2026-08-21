@@ -21,7 +21,7 @@ To see a quick demo, inside a |kitty| terminal run::
 You can also see a screenshot with more sophisticated features such as
 alpha-blending and text over graphics.
 
-.. image:: https://user-images.githubusercontent.com/1308621/31647475-1188ab66-b326-11e7-8d26-24b937f1c3e8.png
+.. image:: https://github.com/user-attachments/assets/78caad22-1798-4ec5-a6ee-2722c51ce875
     :alt: Demo of graphics rendering in kitty
     :align: center
 
@@ -254,10 +254,12 @@ All graphics escape codes are of the form::
 This is a so-called *Application Programming Command (APC)*. Most terminal
 emulators ignore APC codes, making it safe to use.
 
-The control data is a comma-separated list of ``key=value`` pairs.  The payload
-is arbitrary binary data, :rfc:`base64 <4648>` encoded to prevent interoperation problems
-with legacy terminals that get confused by control codes within an APC code.
-The meaning of the payload is interpreted based on the control data.
+The control data is a comma-separated list of ``key=value`` pairs, trailing or
+leading commas are undefined implementations may ignore them or reject the
+escape code entirely. The payload is arbitrary binary data, :rfc:`base64
+<4648>` encoded to prevent interoperation problems with legacy terminals that
+get confused by control codes within an APC code. The meaning of the payload is
+interpreted based on the control data.
 
 The first step is to transmit the actual image data.
 
@@ -1004,8 +1006,8 @@ To achieve this use the ``a=c`` key. The source frame is specified with
 ``r=frame number`` and the destination frame as ``c=frame number``. The size of
 the rectangle is specified as ``w=width,h=height`` pixels. If unspecified, the
 full image width and height are used. The offset of the rectangle from the
-top-left corner for the source frame is specified by the ``x,y`` keys and the
-destination frame by the ``X,Y`` keys. The composition operation is specified
+top-left corner for the source frame is specified by the ``X,Y`` keys and the
+destination frame by the ``x,y`` keys. The composition operation is specified
 by the ``C`` key with the default being to alpha blend the source rectangle
 onto the destination rectangle. With ``C=1`` it will be a simple replacement
 of pixels. For example::
@@ -1117,8 +1119,8 @@ Key      Value                 Default    Description
 **Keys for animation frame composition**
 -----------------------------------------------------------
 
-``c``    Positive integer      ``0``      The 1-based frame number of the frame whose image data serves as the overlaid data
-``r``    Positive integer      ``0``      The 1-based frame number of the frame that is being edited.
+``c``    Positive integer      ``0``      The 1-based frame number of the frame that is being edited
+``r``    Positive integer      ``0``      The 1-based frame number of the frame whose image data serves as the overlaid data
 ``x``    Positive integer      ``0``      The left edge (in pixels) of the destination rectangle
 ``y``    Positive integer      ``0``      The top edge (in pixels) of the destination rectangle
 ``w``    Positive integer      ``0``      The width (in pixels) of the source and destination rectangles. By default, the entire width is used

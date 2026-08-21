@@ -201,6 +201,15 @@ Detailed list of changes
 
 - Support for :doc:`/custom-shaders` for adding various graphical effects (:iss:`10344`)
 
+- Graphics protocol: Fix a regression in 0.45.0 that caused the overwrite
+  composition mode for animation frames (``a=f``) to be controlled by the
+  undocumented ``C`` key instead of the documented ``X`` key (:iss:`10379`)
+
+- Graphics protocol: Fix chunked transmission of animation frame data
+  (``a=f``) replacing the image's root frame instead of creating or editing
+  the animation frame, when the continuation chunks contain only the ``m``
+  key, as prescribed by the spec
+
 - Various throughput performance improvements for a 15-35% real world improvement depending on workload
 
 - A new option :opt:`remap_modifiers` to allow having modifier keys behave as different modifier keys (:pull:`10307`)
@@ -226,13 +235,19 @@ Detailed list of changes
 
 - Sessions: Also save/restore layouts other than the currently active layout (:pull:`10324`)
 
-- Wayland: Fix clipboard sharing between kitty instances in containers with isolated PID namespaces (:iss:`10352`)
+- Wayland: Fix clipboard sharing between kitty instances in containers with isolated PID namespaces and stale paste data when used with clipboard managers that restore application private MIME types (:iss:`10352`, :iss:`10376`)
 
 - When expanding a window in alternate screen mode use the most common
   background color as the color for the newly created lines leading to less
   visual flicker until the application can redraw itself (:iss:`10365`)
 
 - macOS: Allow kitty OS Windows to participate in Split View tiling (:pull:`103701`)
+
+- Port remaining built in kittens from Python to Go (:pull:`10371`)
+
+- Graphics protocol: Fix scaled images (created with the ``r`` or ``c`` keys)
+  being distorted instead of clipped when scrolled against a margin
+  (:iss:`10377`)
 
 
 0.48.2 [2026-07-30]

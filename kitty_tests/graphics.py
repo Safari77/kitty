@@ -1029,6 +1029,50 @@ class TestGraphics(BaseTest):
         self.ae(layers(s)[0]['src_rect'], {'left': 0.0, 'top': 0.0, 'right': 1.0, 'bottom': 0.5})
         s.reverse_index()
         self.ae(s.grman.image_count, 2)
+        # Test that scaled images (r=/c=) are clipped rather than distorted
+        # when scrolled against a margin (#10377)
+        s.reset()
+        s.set_margins(1, 3)  # 1-based indexing
+        put_image(s, cw, 4 * ch, num_cols=1, num_lines=2, no_id=True)  # 10x80 px image scaled into 1x2 cells at (0, 0)
+        self.ae(s.grman.image_count, 1)
+        self.ae(layers(s)[0]['src_rect'], {'left': 0.0, 'top': 0.0, 'right': 1.0, 'bottom': 1.0})
+        rect_eq(layers(s)[0]['dest_rect'], -1, 1, -1 + dx, 1 - 2 * dy)
+        while s.cursor.y != 2:
+            s.index()
+        s.index()  # scroll up, the top row of the image is clipped
+        l0 = layers(s)
+        self.ae(len(l0), 1)
+        self.ae(l0[0]['src_rect'], {'left': 0.0, 'top': 0.5, 'right': 1.0, 'bottom': 1.0})
+        rect_eq(l0[0]['dest_rect'], -1, 1, -1 + dx, 1 - dy)
+        s.index()
+        self.ae(s.grman.image_count, 0)
+        # Now check clipping of a scaled image at the bottom margin
+        s.reset()
+        s.set_margins(1, 3)
+        s.index()
+        put_image(s, cw, 4 * ch, num_cols=1, num_lines=2, no_id=True)  # 1x2 cells at (0, 1)
+        while s.cursor.y != 0:
+            s.reverse_index()
+        s.reverse_index()  # scroll down, the bottom row of the image is clipped
+        l0 = layers(s)
+        self.ae(len(l0), 1)
+        self.ae(l0[0]['src_rect'], {'left': 0.0, 'top': 0.0, 'right': 1.0, 'bottom': 0.5})
+        rect_eq(l0[0]['dest_rect'], -1, 1 - 2 * dy, -1 + dx, 1 - 3 * dy)
+        s.reverse_index()
+        self.ae(s.grman.image_count, 0)
+        # Scaling specified via c= only, with the height derived from the aspect ratio
+        s.reset()
+        s.set_margins(1, 3)
+        put_image(s, 2 * cw, 4 * ch, num_cols=1, no_id=True)  # 20x80 px image scaled into 1 col => 10x40 px => 1x2 cells
+        rect_eq(layers(s)[0]['dest_rect'], -1, 1, -1 + dx, 1 - 2 * dy)
+        while s.cursor.y != 2:
+            s.index()
+        s.index()  # scroll up, the top row of the image is clipped
+        l0 = layers(s)
+        self.ae(l0[0]['src_rect'], {'left': 0.0, 'top': 0.5, 'right': 1.0, 'bottom': 1.0})
+        rect_eq(l0[0]['dest_rect'], -1, 1, -1 + dx, 1 - dy)
+        s.index()
+        self.ae(s.grman.image_count, 0)
         s.reset()
         self.assertEqual(s.grman.disk_cache.total_size, 0)
 
@@ -1186,6 +1230,21 @@ class TestGraphics(BaseTest):
         t(payload='3' * 36, r=2)
         img = g.image_for_client_id(1)
         self.assertEqual(img['extra_frames'], ({'gap': 77, 'id': 2, 'data': b'3' * 36},))
+        # the composition mode for frame edits must be controlled by the X key,
+        # with fully transparent pixels being a no-op unless X=1 (issue #10379)
+        transparent = b'\x00' * 48
+        t(payload=transparent, r=2, f=32)
+        img = g.image_for_client_id(1)
+        self.assertEqual(img['extra_frames'], ({'gap': 77, 'id': 2, 'data': b'3' * 36},))
+        t(payload=transparent, r=2, f=32, C=1)
+        img = g.image_for_client_id(1)
+        self.assertEqual(img['extra_frames'], ({'gap': 77, 'id': 2, 'data': b'3' * 36},))
+        t(payload=transparent, r=2, f=32, X=1)
+        img = g.image_for_client_id(1)
+        self.assertEqual(img['extra_frames'], ({'gap': 77, 'id': 2, 'data': b'\x00' * 36},))
+        t(payload='3' * 36, r=2)
+        img = g.image_for_client_id(1)
+        self.assertEqual(img['extra_frames'], ({'gap': 77, 'id': 2, 'data': b'3' * 36},))
         # test loading from previous frame
         t(payload='4' * 12, c=2, s=2, v=2, z=101, frame_number=3)
         img = g.image_for_client_id(1)
@@ -1298,6 +1357,32 @@ class TestGraphics(BaseTest):
                 'EINVAL',
                 f'Expected EINVAL for overflow in compose offset parameter {offset_param!r}',
             )
+
+    def test_animation_frame_chunked_loading(self):
+        # continuation chunks of a chunked a=f transmission carry only the m key,
+        # they must be routed to the frame load handler, not the add handler
+        s = self.create_screen()
+        g = s.grman
+        li = make_send_command(s)
+        self.assertEqual(li(a='t').code, 'OK')
+
+        def chunked(payload, last_payload, **kw):
+            self.assertIsNone(li(payload=payload, m=1, **kw))
+            self.assertFalse(send_command(s, 'm=1', payload))
+            return parse_full_response(send_command(s, 'm=0', last_payload))
+
+        # create a new frame with continuation chunks
+        res = chunked('2' * 12, '2' * 12, z=77)
+        self.assertEqual((res.code, res.image_id, res.frame_number), ('OK', 1, 2))
+        img = g.image_for_client_id(1)
+        self.assertEqual(img['data'], b'abcdefghijkl' * 3)  # root frame must be untouched
+        self.assertEqual(img['extra_frames'], ({'gap': 77, 'id': 2, 'data': b'2' * 36},))
+        # edit an existing frame with continuation chunks, r= is only present
+        # in the start command
+        res = chunked('3' * 12, '3' * 12, r=2)
+        self.assertEqual((res.code, res.image_id, res.frame_number), ('OK', 1, 2))
+        img = g.image_for_client_id(1)
+        self.assertEqual(img['extra_frames'], ({'gap': 77, 'id': 2, 'data': b'3' * 36},))
 
     def test_graphics_quota_enforcement(self):
         s = self.create_screen()
