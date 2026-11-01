@@ -435,6 +435,10 @@ Detailed list of changes
 - Themes kitten: Fix overwriting the Unicode input kitten's recent entries
   and input mode, and vice versa, by using separate caches (:pull:`10780`)
 
+- Remote file kitten: Preserve the local edited copy and show its recovery path
+  when the final upload fails, including when the SSH connection has died
+  (:pull:`10789`)
+
 - Transfer kitten: When receiving files, replace existing symbolic and hard
   links at the destination instead of overwriting the files they point to, and
   write to a temporary file that is renamed into place, so an interrupted
